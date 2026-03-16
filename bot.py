@@ -8,7 +8,7 @@ import psutil
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-API_ID = int(os.getenv("API_ID", "0"))
+API_ID = int(os.getenv("30291360", "0"))
 API_HASH = os.getenv("0f7c28c9e4c3ae162d8f23e020d613b5", "")
 BOT_TOKEN = os.getenv("8796804309:AAEuZ31sWkY8XMJF5ogORBDYC3fw5xK0nYE", "")
 
