@@ -1,19 +1,25 @@
 import os
 import time
 import zipfile
+import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 API_ID = 30291360
 API_HASH = "0f7c28c9e4c3ae162d8f23e020d613b5"
-BOT_TOKEN = "8796804309:AAEuZ31sWkY8XMJF5ogORBDYC3fw5xK0nYE"
+BOT_TOKEN = "YOUR_BOT_TOKEN"
 
 ALLOWED_USERS = [6050411363, 1723943834]
 
 DOWNLOAD_DIR = "files"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-app = Client("dynamic_archiver", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = Client(
+    "dynamic_archiver",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
 
 sessions = {}
 
@@ -73,6 +79,12 @@ async def collect(_, m):
     if user not in sessions:
         return
 
+    size = m.document.file_size if m.document else 0
+
+    if size > 2000 * 1024 * 1024:
+        await m.reply("❌ File too large (2GB limit).")
+        return
+
     sessions[user]["files"].append(m)
 
     name = m.document.file_name if m.document else "file"
@@ -110,8 +122,8 @@ async def choose_level(_, q):
     kb = InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("Low ⚡", callback_data="lvl_low"),
-                InlineKeyboardButton("Medium ⚖", callback_data="lvl_med"),
+                InlineKeyboardButton("Low ⚡️", callback_data="lvl_low"),
+                InlineKeyboardButton("Medium ⚖️", callback_data="lvl_med"),
                 InlineKeyboardButton("High 🗜", callback_data="lvl_high")
             ]
         ]
@@ -143,69 +155,84 @@ async def process_archive(_, m):
 
         status = await m.reply("Preparing download...")
 
-        start = time.time()
-        paths = []
+        try:
 
-        for file_msg in sessions[user]["files"]:
+            start = time.time()
+            paths = []
 
-            file_name = file_msg.document.file_name
-            path = os.path.join(DOWNLOAD_DIR, file_name)
+            for file_msg in sessions[user]["files"]:
 
-            await file_msg.download(
-                file_name=path,
+                file_name = file_msg.document.file_name.replace("/", "_")
+                path = os.path.join(DOWNLOAD_DIR, file_name)
+
+                await file_msg.download(
+                    file_name=path,
+                    progress=progress,
+                    progress_args=(status, "Downloading", start)
+                )
+
+                paths.append(path)
+
+            await status.edit("⚡️ Compressing...")
+            await asyncio.sleep(1)
+
+            fmt = sessions[user]["format"]
+            archive_name = f"{sessions[user]['name']}.{fmt}"
+            archive_path = os.path.join(DOWNLOAD_DIR, archive_name)
+
+            if fmt == "zip":
+
+                compression = {
+                    "low": zipfile.ZIP_DEFLATED,
+                    "med": zipfile.ZIP_BZIP2,
+                    "high": zipfile.ZIP_LZMA
+                }[sessions[user]["level"]]
+
+                with zipfile.ZipFile(archive_path, "w", compression=compression) as z:
+                    for p in paths:
+                        z.write(p, os.path.basename(p))
+
+            else:
+
+                level_map = {
+                    "low": "1",
+                    "med": "5",
+                    "high": "9"
+                }
+
+                level = level_map[sessions[user]["level"]]
+                file_list = " ".join(paths)
+
+                os.system(f'7z a -t7z -mx={level} "{archive_path}" {file_list}')
+
+            await status.edit("📤 Uploading archive...")
+
+            await m.reply_document(
+                archive_path,
                 progress=progress,
-                progress_args=(status, "Downloading", start)
+                progress_args=(status, "Uploading", start)
             )
 
-            paths.append(path)
+            await status.edit("✅ Done!")
 
-        await status.edit("⚡ Compressing...")
+            for p in paths:
+                try:
+                    os.remove(p)
+                except:
+                    pass
 
-        fmt = sessions[user]["format"]
-        archive_name = f"{sessions[user]['name']}.{fmt}"
-        archive_path = os.path.join(DOWNLOAD_DIR, archive_name)
+            try:
+                os.remove(archive_path)
+            except:
+                pass
 
-        if fmt == "zip":
+            sessions.pop(user)
 
-            compression = {
-                "low": zipfile.ZIP_DEFLATED,
-                "med": zipfile.ZIP_BZIP2,
-                "high": zipfile.ZIP_LZMA
-            }[sessions[user]["level"]]
+        except Exception as e:
 
-            with zipfile.ZipFile(archive_path, "w", compression=compression) as z:
-                for p in paths:
-                    z.write(p, os.path.basename(p))
+            await status.edit(f"❌ Error:\n{e}")
 
-        else:
-
-            level_map = {
-                "low": "1",
-                "med": "5",
-                "high": "9"
-            }
-
-            level = level_map[sessions[user]["level"]]
-            file_list = " ".join(paths)
-
-            os.system(f'7z a -t7z -mx={level} "{archive_path}" {file_list}')
-
-        await status.edit("📤 Uploading archive...")
-
-        await m.reply_document(
-            archive_path,
-            progress=progress,
-            progress_args=(status, "Uploading", start)
-        )
-
-        await status.edit("✅ Done!")
-
-        for p in paths:
-            os.remove(p)
-
-        os.remove(archive_path)
-
-        sessions.pop(user)
+            sessions.pop(user, None)
 
 
 @app.on_message(filters.command("cancel"))
