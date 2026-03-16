@@ -1,17 +1,19 @@
 import os
 import time
-import zipfile
 import asyncio
+import subprocess
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 API_ID = 30291360
-API_HASH = "0f7c28c9e4c3ae162d8f23e020d613b5"
+API_HASH = "0f7c28c9e4c3ae162d8f23e020d613b5
 BOT_TOKEN = "8796804309:AAEuZ31sWkY8XMJF5ogORBDYC3fw5xK0nYE"
 
 ALLOWED_USERS = [6050411363, 1723943834]
 
 DOWNLOAD_DIR = "files"
+MAX_SPLIT_SIZE = 1900 * 1024 * 1024
+
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 app = Client(
@@ -24,9 +26,9 @@ app = Client(
 sessions = {}
 
 
-def progress_bar(percent):
-    filled = int(percent / 10)
-    return "█" * filled + "░" * (10 - filled)
+def bar(p):
+    f = int(p / 10)
+    return "█" * f + "░" * (10 - f)
 
 
 async def progress(current, total, msg, stage, start):
@@ -37,14 +39,13 @@ async def progress(current, total, msg, stage, start):
     eta = (total - current) / speed if speed else 0
 
     text = f"""
-📦 Dynamic Archiver
+📦 Dynamic Archiver Elite
 
 Stage: {stage}
-Progress: {progress_bar(percent)} {percent:.1f}%
+Progress: {bar(percent)} {percent:.1f}%
 
 Speed: {speed/1024/1024:.2f} MB/s
 ETA: {int(eta)}s
-Elapsed: {int(elapsed)}s
 """
 
     try:
@@ -63,11 +64,12 @@ async def start(_, m):
         "files": [],
         "format": None,
         "level": None,
-        "name": None
+        "name": None,
+        "password": None
     }
 
     await m.reply(
-        "📦 Dynamic Archiver\n\nUpload files to archive.\nWhen finished send /done"
+        "📦 Dynamic Archiver Elite\n\nUpload files then send /done"
     )
 
 
@@ -79,17 +81,11 @@ async def collect(_, m):
     if user not in sessions:
         return
 
-    size = m.document.file_size if m.document else 0
-
-    if size > 2000 * 1024 * 1024:
-        await m.reply("❌ File too large (2GB limit).")
-        return
-
     sessions[user]["files"].append(m)
 
     name = m.document.file_name if m.document else "file"
 
-    await m.reply(f"📁 Queued: {name}")
+    await m.reply(f"📁 Added: {name}")
 
 
 @app.on_message(filters.command("done"))
@@ -97,52 +93,52 @@ async def choose_format(_, m):
 
     user = m.from_user.id
 
-    if user not in sessions or not sessions[user]["files"]:
-        await m.reply("No files uploaded.")
+    if not sessions[user]["files"]:
+        await m.reply("Upload files first.")
         return
 
-    kb = InlineKeyboardMarkup(
+    kb = InlineKeyboardMarkup([
         [
-            [
-                InlineKeyboardButton("ZIP", callback_data="fmt_zip"),
-                InlineKeyboardButton("7Z", callback_data="fmt_7z")
-            ]
+            InlineKeyboardButton("ZIP", callback_data="fmt_zip"),
+            InlineKeyboardButton("7Z", callback_data="fmt_7z")
         ]
-    )
+    ])
 
-    await m.reply("Choose archive format:", reply_markup=kb)
+    await m.reply("Choose archive format", reply_markup=kb)
 
 
 @app.on_callback_query(filters.regex("fmt_"))
 async def choose_level(_, q):
 
     user = q.from_user.id
+
     sessions[user]["format"] = q.data.split("_")[1]
 
-    kb = InlineKeyboardMarkup(
+    kb = InlineKeyboardMarkup([
         [
-            [
-                InlineKeyboardButton("Low ⚡️", callback_data="lvl_low"),
-                InlineKeyboardButton("Medium ⚖️", callback_data="lvl_med"),
-                InlineKeyboardButton("High 🗜", callback_data="lvl_high")
-            ]
+            InlineKeyboardButton("Low", callback_data="lvl_low"),
+            InlineKeyboardButton("Medium", callback_data="lvl_med"),
+            InlineKeyboardButton("High", callback_data="lvl_high")
         ]
-    )
+    ])
 
-    await q.message.edit("Select compression level:", reply_markup=kb)
+    await q.message.edit("Compression level", reply_markup=kb)
 
 
 @app.on_callback_query(filters.regex("lvl_"))
 async def ask_name(_, q):
 
     user = q.from_user.id
+
     sessions[user]["level"] = q.data.split("_")[1]
 
-    await q.message.edit("Send archive name.")
+    await q.message.edit(
+        "Send archive name.\n\nOptional password:\n\nexample:\narchive | mypass"
+    )
 
 
-@app.on_message(filters.text & ~filters.command(["start", "done", "cancel"]))
-async def process_archive(_, m):
+@app.on_message(filters.text)
+async def process(_, m):
 
     user = m.from_user.id
 
@@ -151,21 +147,27 @@ async def process_archive(_, m):
 
     if sessions[user]["name"] is None:
 
-        sessions[user]["name"] = m.text
+        txt = m.text.split("|")
 
-        status = await m.reply("Preparing download...")
+        sessions[user]["name"] = txt[0].strip()
+
+        if len(txt) > 1:
+            sessions[user]["password"] = txt[1].strip()
+
+        status = await m.reply("Downloading files...")
 
         try:
 
             start = time.time()
             paths = []
 
-            for file_msg in sessions[user]["files"]:
+            for msg in sessions[user]["files"]:
 
-                file_name = file_msg.document.file_name.replace("/", "_")
-                path = os.path.join(DOWNLOAD_DIR, file_name)
+                fname = msg.document.file_name.replace("/", "_")
 
-                await file_msg.download(
+                path = os.path.join(DOWNLOAD_DIR, fname)
+
+                await msg.download(
                     file_name=path,
                     progress=progress,
                     progress_args=(status, "Downloading", start)
@@ -173,78 +175,71 @@ async def process_archive(_, m):
 
                 paths.append(path)
 
-            await status.edit("⚡️ Compressing...")
-            await asyncio.sleep(1)
+            await status.edit("⚡ Compressing...")
 
             fmt = sessions[user]["format"]
-            archive_name = f"{sessions[user]['name']}.{fmt}"
+            level_map = {"low": "1", "med": "5", "high": "9"}
+
+            level = level_map[sessions[user]["level"]]
+
+            archive_name = sessions[user]["name"]
+
             archive_path = os.path.join(DOWNLOAD_DIR, archive_name)
 
+            cmd = [
+                "7z",
+                "a",
+                f"-mx={level}",
+                f"-v{MAX_SPLIT_SIZE}"
+            ]
+
+            if password:
+                cmd.append(f"-p{password}")
+
             if fmt == "zip":
-
-                compression = {
-                    "low": zipfile.ZIP_DEFLATED,
-                    "med": zipfile.ZIP_BZIP2,
-                    "high": zipfile.ZIP_LZMA
-                }[sessions[user]["level"]]
-
-                with zipfile.ZipFile(archive_path, "w", compression=compression) as z:
-                    for p in paths:
-                        z.write(p, os.path.basename(p))
-
+                cmd.append("-tzip")
             else:
+                cmd.append("-t7z")
 
-                level_map = {
-                    "low": "1",
-                    "med": "5",
-                    "high": "9"
-                }
+            cmd.append(archive_path)
+            cmd += paths
 
-                level = level_map[sessions[user]["level"]]
-                file_list = " ".join(paths)
+            subprocess.run(cmd)
 
-                os.system(f'7z a -t7z -mx={level} "{archive_path}" {file_list}')
+            await status.edit("Uploading archive...")
 
-            await status.edit("📤 Uploading archive...")
+            parts = [
+                os.path.join(DOWNLOAD_DIR, f)
+                for f in os.listdir(DOWNLOAD_DIR)
+                if f.startswith(archive_name)
+            ]
 
-            await m.reply_document(
-                archive_path,
-                progress=progress,
-                progress_args=(status, "Uploading", start)
-            )
+            for p in parts:
 
-            await status.edit("✅ Done!")
+                await m.reply_document(
+                    p,
+                    progress=progress,
+                    progress_args=(status, "Uploading", start)
+                )
 
-            for p in paths:
+            await status.edit("✅ Archive complete!")
+
+            for f in paths + parts:
                 try:
-                    os.remove(p)
+                    os.remove(f)
                 except:
                     pass
-
-            try:
-                os.remove(archive_path)
-            except:
-                pass
 
             sessions.pop(user)
 
         except Exception as e:
 
-            await status.edit(f"❌ Error:\n{e}")
+            await status.edit(f"❌ Error\n{e}")
 
             sessions.pop(user, None)
 
 
-@app.on_message(filters.command("cancel"))
-async def cancel(_, m):
-
-    user = m.from_user.id
-
-    if user in sessions:
-        sessions.pop(user)
-
-    await m.reply("❌ Task cancelled.")
-
-
-print("Dynamic Archiver Running...")
+print("Dynamic Archiver Elite Running")
 app.run()
+
+            password = sessions[user]["password"]
