@@ -1,18 +1,20 @@
 import os
 import time
-import asyncio
 import subprocess
+import asyncio
+import psutil
+
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 API_ID = 30291360
-API_HASH = "0f7c28c9e4c3ae162d8f23e020d613b5
+API_HASH = "0f7c28c9e4c3ae162d8f23e020d613b5"
 BOT_TOKEN = "8796804309:AAEuZ31sWkY8XMJF5ogORBDYC3fw5xK0nYE"
 
 ALLOWED_USERS = [6050411363, 1723943834]
 
 DOWNLOAD_DIR = "files"
-MAX_SPLIT_SIZE = 1900 * 1024 * 1024
+MAX_SPLIT_SIZE = "1900m"
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -26,26 +28,50 @@ app = Client(
 sessions = {}
 
 
-def bar(p):
-    f = int(p / 10)
-    return "█" * f + "░" * (10 - f)
+# ---------- UTILITIES ----------
+
+def progress_bar(p):
+    filled = int(p / 10)
+    return "█" * filled + "░" * (10 - filled)
 
 
-async def progress(current, total, msg, stage, start):
+def disk_status():
+    usage = psutil.disk_usage("/")
+    percent = usage.percent
+    return percent
 
-    percent = current * 100 / total
-    elapsed = time.time() - start
-    speed = current / elapsed if elapsed else 0
-    eta = (total - current) / speed if speed else 0
+
+def ram_status():
+    ram = psutil.virtual_memory().percent
+    return ram
+
+
+def cleanup():
+    for f in os.listdir(DOWNLOAD_DIR):
+        try:
+            os.remove(os.path.join(DOWNLOAD_DIR, f))
+        except:
+            pass
+
+
+cleanup()
+
+
+async def render_progress(msg, stage, percent, speed=0, eta=0):
 
     text = f"""
-📦 Dynamic Archiver Elite
+╭━━━ Dynamic Archiver ━━━╮
 
-Stage: {stage}
-Progress: {bar(percent)} {percent:.1f}%
+⚡ Stage : {stage}
 
-Speed: {speed/1024/1024:.2f} MB/s
-ETA: {int(eta)}s
+{progress_bar(percent)} {percent:.1f}%
+
+🚀 Speed : {speed:.2f} MB/s
+⏳ ETA   : {eta}s
+💾 Disk  : {disk_status()}%
+🧠 RAM   : {ram_status()}%
+
+╰━━━━━━━━━━━━━━━━━━━━━━━╯
 """
 
     try:
@@ -53,6 +79,23 @@ ETA: {int(eta)}s
     except:
         pass
 
+
+async def upload_with_retry(message, file_path):
+
+    for attempt in range(3):
+
+        try:
+            await message.reply_document(file_path)
+            return True
+
+        except Exception:
+
+            await asyncio.sleep(3)
+
+    return False
+
+
+# ---------- BOT COMMANDS ----------
 
 @app.on_message(filters.command("start"))
 async def start(_, m):
@@ -68,9 +111,7 @@ async def start(_, m):
         "password": None
     }
 
-    await m.reply(
-        "📦 Dynamic Archiver Elite\n\nUpload files then send /done"
-    )
+    await m.reply("📦 Dynamic Archiver\nUpload files then send /done")
 
 
 @app.on_message(filters.document | filters.video | filters.audio)
@@ -83,9 +124,7 @@ async def collect(_, m):
 
     sessions[user]["files"].append(m)
 
-    name = m.document.file_name if m.document else "file"
-
-    await m.reply(f"📁 Added: {name}")
+    await m.reply("📁 File added")
 
 
 @app.on_message(filters.command("done"))
@@ -104,14 +143,13 @@ async def choose_format(_, m):
         ]
     ])
 
-    await m.reply("Choose archive format", reply_markup=kb)
+    await m.reply("Choose format", reply_markup=kb)
 
 
 @app.on_callback_query(filters.regex("fmt_"))
 async def choose_level(_, q):
 
     user = q.from_user.id
-
     sessions[user]["format"] = q.data.split("_")[1]
 
     kb = InlineKeyboardMarkup([
@@ -129,11 +167,10 @@ async def choose_level(_, q):
 async def ask_name(_, q):
 
     user = q.from_user.id
-
     sessions[user]["level"] = q.data.split("_")[1]
 
     await q.message.edit(
-        "Send archive name.\n\nOptional password:\n\nexample:\narchive | mypass"
+        "Send archive name\n\nExample:\narchive | password"
     )
 
 
@@ -156,39 +193,36 @@ async def process(_, m):
 
         status = await m.reply("Downloading files...")
 
-        try:
+        paths = []
 
-            start = time.time()
-            paths = []
+        start = time.time()
+
+        try:
 
             for msg in sessions[user]["files"]:
 
-                fname = msg.document.file_name.replace("/", "_")
+                name = msg.document.file_name.replace("/", "_")
+                path = os.path.join(DOWNLOAD_DIR, name)
 
-                path = os.path.join(DOWNLOAD_DIR, fname)
-
-                await msg.download(
-                    file_name=path,
-                    progress=progress,
-                    progress_args=(status, "Downloading", start)
-                )
-
+                await msg.download(file_name=path)
+                
                 paths.append(path)
 
             await status.edit("⚡ Compressing...")
 
-            fmt = sessions[user]["format"]
             level_map = {"low": "1", "med": "5", "high": "9"}
-
             level = level_map[sessions[user]["level"]]
 
-            archive_name = sessions[user]["name"]
+            name = sessions[user]["name"]
+            password = sessions[user]["password"]
 
-            archive_path = os.path.join(DOWNLOAD_DIR, archive_name)
+            archive = os.path.join(DOWNLOAD_DIR, name)
 
             cmd = [
                 "7z",
                 "a",
+                "-mmt=on",
+                "-m0=lzma2",
                 f"-mx={level}",
                 f"-v{MAX_SPLIT_SIZE}"
             ]
@@ -196,50 +230,59 @@ async def process(_, m):
             if password:
                 cmd.append(f"-p{password}")
 
-            if fmt == "zip":
+            if sessions[user]["format"] == "zip":
                 cmd.append("-tzip")
             else:
                 cmd.append("-t7z")
 
-            cmd.append(archive_path)
+            cmd.append(archive)
             cmd += paths
 
-            subprocess.run(cmd)
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True
+            )
+
+            percent = 0
+
+            while process.poll() is None:
+
+                percent += 1
+                if percent > 100:
+                    percent = 100
+
+                await render_progress(status, "Compressing", percent)
+
+                await asyncio.sleep(1)
 
             await status.edit("Uploading archive...")
 
             parts = [
                 os.path.join(DOWNLOAD_DIR, f)
                 for f in os.listdir(DOWNLOAD_DIR)
-                if f.startswith(archive_name)
+                if f.startswith(name)
             ]
 
             for p in parts:
 
-                await m.reply_document(
-                    p,
-                    progress=progress,
-                    progress_args=(status, "Uploading", start)
-                )
+                await upload_with_retry(m, p)
 
             await status.edit("✅ Archive complete!")
 
-            for f in paths + parts:
-                try:
-                    os.remove(f)
-                except:
-                    pass
+            cleanup()
 
             sessions.pop(user)
 
         except Exception as e:
 
-            await status.edit(f"❌ Error\n{e}")
+            await status.edit(f"❌ Error:\n{e}")
+
+            cleanup()
 
             sessions.pop(user, None)
 
 
-print("Dynamic Archiver Elite Running")
+print("Dynamic Archiver Titan+ Running")
 app.run()
-
-            password = sessions[user]["password"]
