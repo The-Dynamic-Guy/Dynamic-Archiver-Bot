@@ -1,13 +1,15 @@
 import os
 import time
-import zipfile
+import asyncio
+import subprocess
+import shutil
 
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 DOWNLOAD_DIR = "files"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -16,29 +18,32 @@ app = Client("dynamic_archiver", api_id=API_ID, api_hash=API_HASH, bot_token=BOT
 
 sessions = {}
 
+
+# ---------- CLEANUP ----------
+def cleanup():
+    for f in os.listdir(DOWNLOAD_DIR):
+        try:
+            path = os.path.join(DOWNLOAD_DIR, f)
+            if os.path.isfile(path):
+                os.remove(path)
+            else:
+                shutil.rmtree(path)
+        except:
+            pass
+
+
 # ---------- UI ----------
-
-def progress_bar(p):
-    filled = int(p / 10)
-    return "█" * filled + "░" * (10 - filled)
+def bar(p):
+    return "█" * int(p/10) + "░" * (10-int(p/10))
 
 
-async def progress(current, total, msg, stage, start, files=1):
-    percent = current * 100 / total if total else 0
-    elapsed = time.time() - start
-    speed = current / elapsed if elapsed else 0
-    eta = (total - current) / speed if speed else 0
-
+async def update(msg, stage, percent):
     text = f"""
 ╭━━━ Dynamic Archiver ━━━╮
 
-⚡ Stage: {stage}
-📦 Files: {files}
+⚡ {stage}
 
-{progress_bar(percent)} {percent:.1f}%
-
-🚀 Speed: {speed/1024/1024:.2f} MB/s
-⏳ ETA: {int(eta)}s
+{bar(percent)} {percent}%
 
 ╰━━━━━━━━━━━━━━━━━━━━━━━╯
 """
@@ -48,58 +53,51 @@ async def progress(current, total, msg, stage, start, files=1):
         pass
 
 
-# ---------- COMMANDS ----------
-
+# ---------- START ----------
 @app.on_message(filters.command("start"))
 async def start(_, m):
+    cleanup()
+
     sessions[m.from_user.id] = {
         "files": [],
         "level": None,
         "name": None
     }
 
-    await m.reply("📦 Dynamic Archiver\nUpload files then send /done")
+    await m.reply("📦 Send files then /done")
 
 
+# ---------- COLLECT ----------
 @app.on_message(filters.document)
 async def collect(_, m):
-    user = m.from_user.id
-    if user not in sessions:
+    if m.from_user.id not in sessions:
         return
 
-    sessions[user]["files"].append(m)
-
-    name = m.document.file_name
-    await m.reply(f"📁 Added: {name}")
+    sessions[m.from_user.id]["files"].append(m)
+    await m.reply("📁 Added")
 
 
+# ---------- DONE ----------
 @app.on_message(filters.command("done"))
-async def choose_level(_, m):
-    user = m.from_user.id
-
-    if not sessions[user]["files"]:
-        await m.reply("Upload files first.")
-        return
-
+async def done(_, m):
     kb = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("Low ⚡", callback_data="low"),
-            InlineKeyboardButton("Medium ⚖", callback_data="med"),
-            InlineKeyboardButton("High 🗜", callback_data="high")
+            InlineKeyboardButton("Fast ⚡", callback_data="1"),
+            InlineKeyboardButton("Balanced ⚖", callback_data="5"),
+            InlineKeyboardButton("Ultra 🗜", callback_data="9")
         ]
     ])
+    await m.reply("Select compression:", reply_markup=kb)
 
-    await m.reply("Select compression level:", reply_markup=kb)
 
-
+# ---------- LEVEL ----------
 @app.on_callback_query()
-async def set_level(_, q):
-    user = q.from_user.id
-    sessions[user]["level"] = q.data
-
+async def level(_, q):
+    sessions[q.from_user.id]["level"] = q.data
     await q.message.edit("Send archive name")
 
 
+# ---------- PROCESS ----------
 @app.on_message(filters.text & ~filters.command(["start", "done"]))
 async def process(_, m):
     user = m.from_user.id
@@ -107,69 +105,55 @@ async def process(_, m):
     if user not in sessions:
         return
 
-    if sessions[user]["name"] is None:
+    sessions[user]["name"] = m.text.strip()
 
-        sessions[user]["name"] = m.text.strip()
+    status = await m.reply("Preparing...")
 
-        status = await m.reply("Preparing...")
+    paths = []
 
-        start = time.time()
-        paths = []
-        total_files = len(sessions[user]["files"])
+    # DOWNLOAD
+    for i, msg in enumerate(sessions[user]["files"], 1):
+        name = msg.document.file_name.replace("/", "_")
+        path = os.path.join(DOWNLOAD_DIR, name)
 
-        # ---------- DOWNLOAD ----------
-        for i, msg in enumerate(sessions[user]["files"], 1):
-            name = msg.document.file_name.replace("/", "_")
-            path = os.path.join(DOWNLOAD_DIR, name)
+        await msg.download(file_name=path)
+        paths.append(path)
 
-            await msg.download(
-                file_name=path,
-                progress=progress,
-                progress_args=(status, f"Downloading ({i}/{total_files})", start, total_files)
-            )
+    await status.edit("⚡ Compressing...")
 
-            paths.append(path)
+    archive = os.path.join(DOWNLOAD_DIR, sessions[user]["name"])
 
-        # ---------- COMPRESSION ----------
-        await status.edit("⚡ Compressing...")
+    cmd = [
+        "7z",
+        "a",
+        "-tzip",
+        f"-mx={sessions[user]['level']}",
+        archive
+    ] + paths
 
-        archive = os.path.join(DOWNLOAD_DIR, sessions[user]["name"] + ".zip")
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True
+    )
 
-        level = sessions[user]["level"]
+    percent = 0
 
-        compression_map = {
-            "low": zipfile.ZIP_STORED,
-            "med": zipfile.ZIP_DEFLATED,
-            "high": zipfile.ZIP_LZMA
-        }
+    while process.poll() is None:
+        percent = min(percent + 2, 100)
+        await update(status, "Compressing", percent)
+        await asyncio.sleep(1)
 
-        comp = compression_map[level]
+    await status.edit("📤 Uploading...")
 
-        with zipfile.ZipFile(archive, "w", compression=comp) as z:
-            for i, p in enumerate(paths, 1):
-                z.write(p, os.path.basename(p))
+    await m.reply_document(archive + ".zip")
 
-                percent = i * 100 / total_files
-                await progress(i, total_files, status, "Compressing", start, total_files)
+    await status.edit("✅ Done")
 
-        # ---------- UPLOAD ----------
-        await status.edit("📤 Uploading...")
-
-        await m.reply_document(
-            archive,
-            progress=progress,
-            progress_args=(status, "Uploading", start, total_files)
-        )
-        
-        await status.edit("✅ Done!")
-
-        # ---------- CLEANUP ----------
-        for p in paths:
-            os.remove(p)
-
-        os.remove(archive)
-        sessions.pop(user)
+    cleanup()
+    sessions.pop(user)
 
 
-print("Titan V2 Running 🚀")
+print("Titan Pro Running 🚀")
 app.run()
