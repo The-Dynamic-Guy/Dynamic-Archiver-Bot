@@ -1,4 +1,3 @@
 pyrogram
 tgcrypto
 psutil
-py7zr
