@@ -181,3 +181,17 @@ async def process(_, m):
 
 print("Titan Stable Running 🚀")
 app.run()
+
+@app.on_message(filters.command("clean"))
+async def manual_clean(_, m):
+    for f in os.listdir(DOWNLOAD_DIR):
+        try:
+            path = os.path.join(DOWNLOAD_DIR, f)
+            if os.path.isfile(path):
+                os.remove(path)
+            else:
+                shutil.rmtree(path)
+        except:
+            pass
+
+    await m.reply("🧹 Storage cleaned successfully!")
