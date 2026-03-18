@@ -1,2 +1,2 @@
 [phases.setup]
-nixPkgs = ["python310", "p7zip"]
+nixPkgs = ["python310", "p7zip-full"]
