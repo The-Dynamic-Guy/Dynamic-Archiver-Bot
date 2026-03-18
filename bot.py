@@ -1,7 +1,7 @@
 import os
 import time
+import zipfile
 import asyncio
-import subprocess
 import shutil
 
 from pyrogram import Client, filters
@@ -17,7 +17,6 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 app = Client("dynamic_archiver", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 sessions = {}
-
 
 # ---------- CLEANUP ----------
 def cleanup():
@@ -37,13 +36,15 @@ def bar(p):
     return "█" * int(p/10) + "░" * (10-int(p/10))
 
 
-async def update(msg, stage, percent):
+async def update(msg, stage, percent, speed=0, eta=0):
     text = f"""
 ╭━━━ Dynamic Archiver ━━━╮
 
 ⚡ {stage}
 
-{bar(percent)} {percent}%
+{bar(percent)} {percent:.1f}%
+
+🚀 {speed:.2f} MB/s | ⏳ {int(eta)}s
 
 ╰━━━━━━━━━━━━━━━━━━━━━━━╯
 """
@@ -51,6 +52,15 @@ async def update(msg, stage, percent):
         await msg.edit(text)
     except:
         pass
+
+
+async def progress(current, total, msg, stage, start):
+    percent = current * 100 / total if total else 0
+    elapsed = time.time() - start
+    speed = current / elapsed if elapsed else 0
+    eta = (total - current) / speed if speed else 0
+
+    await update(msg, stage, percent, speed/1024/1024, eta)
 
 
 # ---------- START ----------
@@ -82,9 +92,9 @@ async def collect(_, m):
 async def done(_, m):
     kb = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("Fast ⚡", callback_data="1"),
-            InlineKeyboardButton("Balanced ⚖", callback_data="5"),
-            InlineKeyboardButton("Ultra 🗜", callback_data="9")
+            InlineKeyboardButton("Fast ⚡", callback_data="low"),
+            InlineKeyboardButton("Balanced ⚖", callback_data="med"),
+            InlineKeyboardButton("Ultra 🗜", callback_data="high")
         ]
     ])
     await m.reply("Select compression:", reply_markup=kb)
@@ -110,50 +120,64 @@ async def process(_, m):
     status = await m.reply("Preparing...")
 
     paths = []
+    start = time.time()
 
-    # DOWNLOAD
-    for i, msg in enumerate(sessions[user]["files"], 1):
-        name = msg.document.file_name.replace("/", "_")
-        path = os.path.join(DOWNLOAD_DIR, name)
+    try:
+        # ---------- DOWNLOAD ----------
+        for i, msg in enumerate(sessions[user]["files"], 1):
+            name = msg.document.file_name.replace("/", "_")
+            path = os.path.join(DOWNLOAD_DIR, name)
 
-        await msg.download(file_name=path)
-        paths.append(path)
+            await msg.download(
+                file_name=path,
+                progress=progress,
+                progress_args=(status, f"Downloading {i}", start)
+            )
 
-    await status.edit("⚡ Compressing...")
+            paths.append(path)
 
-    archive = os.path.join(DOWNLOAD_DIR, sessions[user]["name"])
+        # ---------- COMPRESSION ----------
+        await status.edit("⚡ Compressing...")
 
-    cmd = [
-        "7z",
-        "a",
-        "-tzip",
-        f"-mx={sessions[user]['level']}",
-        archive
-    ] + paths
+        archive = os.path.join(DOWNLOAD_DIR, sessions[user]["name"] + ".zip")
 
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True
-    )
+        compression_map = {
+            "low": zipfile.ZIP_STORED,
+            "med": zipfile.ZIP_DEFLATED,
+            "high": zipfile.ZIP_LZMA
+        }
 
-    percent = 0
+        comp = compression_map[sessions[user]["level"]]
 
-    while process.poll() is None:
-        percent = min(percent + 2, 100)
-        await update(status, "Compressing", percent)
-        await asyncio.sleep(1)
+        total = len(paths)
 
-    await status.edit("📤 Uploading...")
+        with zipfile.ZipFile(archive, "w", compression=comp) as z:
+            for i, p in enumerate(paths, 1):
+                z.write(p, os.path.basename(p))
 
-    await m.reply_document(archive + ".zip")
+                percent = i * 100 / total
+                await update(status, "Compressing", percent)
 
-    await status.edit("✅ Done")
+                await asyncio.sleep(0)
 
-    cleanup()
-    sessions.pop(user)
+        # ---------- UPLOAD ----------
+        await status.edit("📤 Uploading...")
+        
+        await m.reply_document(
+            archive,
+            progress=progress,
+            progress_args=(status, "Uploading", start)
+        )
+
+        await status.edit("✅ Done")
+
+    except Exception as e:
+        await status.edit(f"❌ Error: {e}")
+
+    finally:
+        cleanup()
+        sessions.pop(user, None)
 
 
-print("Titan Pro Running 🚀")
+print("Titan Stable Running 🚀")
 app.run()
