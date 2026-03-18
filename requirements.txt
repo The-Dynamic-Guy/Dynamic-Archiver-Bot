@@ -1,4 +1,4 @@
 pyrogram
 tgcrypto
 psutil
-aiofiles
+py7zr
