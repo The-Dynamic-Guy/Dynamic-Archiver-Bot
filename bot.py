@@ -177,12 +177,8 @@ async def process(_, m):
     finally:
         cleanup()
         sessions.pop(user, None)
-
-
-print("Titan Stable Running 🚀")
-app.run()
-
-@app.on_message(filters.command("clean"))
+        
+        @app.on_message(filters.command("clean"))
 async def manual_clean(_, m):
     for f in os.listdir(DOWNLOAD_DIR):
         try:
@@ -195,3 +191,8 @@ async def manual_clean(_, m):
             pass
 
     await m.reply("🧹 Storage cleaned successfully!")
+
+
+print("Titan Stable Running 🚀")
+app.run()
+
