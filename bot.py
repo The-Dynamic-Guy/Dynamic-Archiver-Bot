@@ -1,124 +1,30 @@
-import os
-import time
-import shutil
-import asyncio
-import subprocess
-import psutil
-
-from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-
-ALLOWED_USERS = [6050411363, 1723943834]
-
-DOWNLOAD_DIR = "files"
-MAX_SPLIT_SIZE = "1900m"
-
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-app = Client(
-    "dynamic_archiver",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN
-)
-
-sessions = {}
+with zipfile.ZipFile(archive_path, "w", compression=compression) as zf:
+        for idx, p in enumerate(paths, start=1):
+            zf.write(p, os.path.basename(p))
+            percent = idx * 100 / total_files if total_files else 100
+            await render_progress(status_msg, "Compressing", percent, 0.0, 0, total_files)
+            await asyncio.sleep(0)
 
 
-def progress_bar(percent: float) -> str:
-    filled = int(percent / 10)
-    return "█" * filled + "░" * (10 - filled)
+async def create_7z_archive(paths: list[str], archive_path: str, level: str, password: str | None, status_msg, total_files: int):
+    filters_map = {
+        "low": [{"id": py7zr.FILTER_COPY}],
+        "med": [{"id": py7zr.FILTER_LZMA2, "preset": 5}],
+        "high": [{"id": py7zr.FILTER_LZMA2, "preset": 9}]
+    }
+    archive_kwargs = {
+        "mode": "w",
+        "filters": filters_map[level]
+    }
+    if password:
+        archive_kwargs["password"] = password
 
-
-def disk_status() -> float:
-    return psutil.disk_usage("/").percent
-
-
-def ram_status() -> float:
-    return psutil.virtual_memory().percent
-
-
-def cleanup_all() -> None:
-    if not os.path.exists(DOWNLOAD_DIR):
-        return
-    for name in os.listdir(DOWNLOAD_DIR):
-        path = os.path.join(DOWNLOAD_DIR, name)
-        try:
-            if os.path.isfile(path) or os.path.islink(path):
-                os.remove(path)
-            elif os.path.isdir(path):
-                shutil.rmtree(path, ignore_errors=True)
-        except Exception:
-            pass
-
-
-def cleanup_user_files(paths: list[str], archive_prefix: str) -> None:
-    for p in paths:
-        try:
-            if os.path.exists(p):
-                os.remove(p)
-        except Exception:
-            pass
-
-    for name in os.listdir(DOWNLOAD_DIR):
-        path = os.path.join(DOWNLOAD_DIR, name)
-        try:
-            if name.startswith(archive_prefix) and os.path.isfile(path):
-                os.remove(path)
-        except Exception:
-            pass
-
-
-async def render_progress(
-    msg,
-    stage: str,
-    percent: float,
-    speed_mb: float = 0.0,
-    eta_sec: int = 0,
-    file_count: int = 0
-) -> None:
-    text = (
-        "╭━━━ Dynamic Archiver ━━━╮\n\n"
-        f"⚡ Stage : {stage}\n\n"
-        f"{progress_bar(percent)} {percent:.1f}%\n\n"
-        f"🚀 Speed : {speed_mb:.2f} MB/s\n"
-        f"⏳ ETA   : {eta_sec}s\n"
-        f"📦 Files : {file_count}\n"
-        f"💾 Disk  : {disk_status()}%\n"
-        f"🧠 RAM   : {ram_status()}%\n\n"
-        "╰━━━━━━━━━━━━━━━━━━━━━━━╯"
-    )
-    try:
-        await msg.edit(text)
-    except Exception:
-        pass
-
-
-async def upload_with_retry(message, file_path: str, status_msg, start_time: float) -> bool:
-    for _ in range(3):
-        try:
-            await message.reply_document(
-                file_path,
-                progress=telegram_progress,
-                progress_args=(status_msg, "Uploading", start_time, 1)
-            )
-            return True
-        except Exception:
-            await asyncio.sleep(3)
-    return False
-
-
-async def telegram_progress(current, total, msg, stage, start, file_count=1):
-    percent = (current / total * 100) if total else 0
-    elapsed = max(time.time() - start, 0.001)
-    speed_mb = (current / elapsed) / 1024 / 1024
-    remaining = max(total - current, 0)
-    eta_sec = int(remaining / (current / elapsed)) if current > 0 else 0
-    await render_progress(msg, stage, percent, speed_mb, eta_sec, file_count)
+    with py7zr.SevenZipFile(archive_path, **archive_kwargs) as zf:
+        for idx, p in enumerate(paths, start=1):
+            zf.write(p, arcname=os.path.basename(p))
+            percent = idx * 100 / total_files if total_files else 100
+            await render_progress(status_msg, "Compressing", percent, 0.0, 0, total_files)
+            await asyncio.sleep(0)
 
 
 cleanup_all()
@@ -207,11 +113,17 @@ async def ask_name(_, q):
 
     sessions[user]["level"] = q.data.split("_", 1)[1]
 
-    await q.message.edit(
-        "Send archive name.\n\n"
-        "Optional password format:\n"
-        "archive_name | password123"
-    )
+    fmt = sessions[user]["format"]
+    if fmt == "7z":
+        prompt = (
+            "Send archive name.\n\n"
+            "Optional password format:\n"
+            "archive_name | password123"
+        )
+    else:
+        prompt = "Send archive name."
+
+    await q.message.edit(prompt)
     await q.answer()
 
 
@@ -229,9 +141,15 @@ async def process_text(_, m):
     if not text_value:
         return
 
-    parts = text_value.split("|", 1)
-    archive_name = parts[0].strip().replace("/", "_")
-    password = parts[1].strip() if len(parts) > 1 else None
+    fmt = sessions[user]["format"]
+    
+    if fmt == "7z":
+        parts = text_value.split("|", 1)
+        archive_name = parts[0].strip().replace("/", "_")
+        password = parts[1].strip() if len(parts) > 1 else None
+    else:
+        archive_name = text_value.replace("/", "_")
+        password = None
 
     if not archive_name:
         await m.reply("Please send a valid archive name.")
@@ -263,81 +181,16 @@ async def process_text(_, m):
 
         await render_progress(status, "Compressing", 0, 0.0, 0, total_files)
 
-        level_map = {"low": "1", "med": "5", "high": "9"}
-        level = level_map[sessions[user]["level"]]
-
-        fmt = sessions[user]["format"]
-        archive_base = os.path.join(DOWNLOAD_DIR, archive_name)
-
-        cmd = [
-            "7z",
-            "a",
-            "-bsp1",
-            "-bso1",
-            "-mmt=on",
-            "-m0=lzma2",
-            f"-mx={level}",
-            f"-v{MAX_SPLIT_SIZE}"
-        ]
-
-        if password:
-            cmd.append(f"-p{password}")
+        level = sessions[user]["level"]
 
         if fmt == "zip":
-            cmd.append("-tzip")
-            archive_target = archive_base + ".zip"
+            archive_path = os.path.join(DOWNLOAD_DIR, archive_name + ".zip")
+            await create_zip_archive(downloaded_paths, archive_path, level, status, total_files)
         else:
-            cmd.append("-t7z")
-            archive_target = archive_base + ".7z"
+            archive_path = os.path.join(DOWNLOAD_DIR, archive_name + ".7z")
+            await create_7z_archive(downloaded_paths, archive_path, level, password, status, total_files)
 
-        cmd.append(archive_target)
-        cmd.extend(downloaded_paths)
-
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True
-        )
-
-        compress_percent = 0
-        last_update = time.time()
-
-        while True:
-            line = proc.stdout.readline() if proc.stdout else ""
-            if not line and proc.poll() is not None:
-                break
-
-            line = line.strip()
-
-            # 7z often emits percentage lines like " 23%"
-            if "%" in line:
-                for token in line.split():
-                    if token.endswith("%"):
-                        raw = token[:-1]
-                        if raw.isdigit():
-                            compress_percent = max(0, min(100, int(raw)))
-                            break
-
-            # fallback slow animation if parser gets nothing
-            if time.time() - last_update >= 1:
-                if compress_percent == 0:
-                    compress_percent = min(compress_percent + 2, 95)
-                await render_progress(status, "Compressing", compress_percent, 0.0, 0, total_files)
-                last_update = time.time()
-
-        return_code = proc.wait()
-        if return_code != 0:
-            raise RuntimeError("Compression failed. 7z returned an error.")
-
-        await render_progress(status, "Compressing", 100, 0.0, 0, total_files)
-
-        archive_parts = sorted(
-            os.path.join(DOWNLOAD_DIR, f)
-            for f in os.listdir(DOWNLOAD_DIR)
-            if f.startswith(archive_name)
-        )
-
+        archive_parts = split_file_if_needed(archive_path)
         if not archive_parts:
             raise RuntimeError("No archive was created.")
 
