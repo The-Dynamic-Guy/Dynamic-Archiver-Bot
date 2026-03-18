@@ -175,10 +175,12 @@ async def process(_, m):
         await status.edit(f"❌ Error: {e}")
 
     finally:
-        cleanup()
-        sessions.pop(user, None)
-        
-        @app.on_message(filters.command("clean"))
+    cleanup()
+    sessions.pop(user, None)
+
+
+# ✅ OUTSIDE everything
+@app.on_message(filters.command("clean"))
 async def manual_clean(_, m):
     for f in os.listdir(DOWNLOAD_DIR):
         try:
@@ -195,4 +197,3 @@ async def manual_clean(_, m):
 
 print("Titan Stable Running 🚀")
 app.run()
-
